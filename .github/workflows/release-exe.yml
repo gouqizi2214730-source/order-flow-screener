@@ -1,0 +1,194 @@
+name: Build & Release OrderFlowScreener Chinese Windows Setup.exe
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release 版本标签 (例如 v2.3.0)"
+        required: false
+        default: "v2.3.0"
+  push:
+    branches:
+      - main
+    paths:
+      - "launcher.py"
+      - "gui_app.py"
+      - "order_flow_engine.py"
+      - "data_sources.py"
+      - "llm_providers.py"
+      - "local_api_server.py"
+      - "updater.py"
+      - "scripts/generate_icon.py"
+      - "installer/order-flow-screener.iss"
+      - ".github/workflows/release-exe.yml"
+  schedule:
+    # 每日 UTC 02:00 自动检查并同步上游 zadescoxp/order-flow-screener 最新代码
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync-build-and-release:
+    name: Windows PySide6 (--onedir) + Inno Setup Release
+    runs-on: windows-latest
+
+    steps:
+      - name: 1. 检出当前 Fork 仓库代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 2. 备份中文桌面 GUI、大模型/数据源中心与自动安装器核心文件
+        shell: pwsh
+        run: |
+          $backupDir = Join-Path $env:RUNNER_TEMP "cn_custom_backup"
+          New-Item -ItemType Directory -Force -Path "$backupDir\scripts" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$backupDir\installer" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$backupDir\.github\workflows" | Out-Null
+
+          $customFiles = @(
+            "launcher.py",
+            "gui_app.py",
+            "order_flow_engine.py",
+            "data_sources.py",
+            "llm_providers.py",
+            "local_api_server.py",
+            "updater.py",
+            "requirements-desktop.txt",
+            "scripts/generate_icon.py",
+            "installer/order-flow-screener.iss",
+            ".github/workflows/release-exe.yml"
+          )
+          foreach ($f in $customFiles) {
+            if (Test-Path $f) {
+              Copy-Item -Path $f -Destination (Join-Path $backupDir $f) -Force
+            }
+          }
+
+      - name: 3. 自动同步上游 zadescoxp/order-flow-screener 最新主分支并恢复中文定制层
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote remove upstream 2>$null
+          git remote add upstream https://github.com/zadescoxp/order-flow-screener.git
+          git fetch upstream main --depth=50
+          git merge upstream/main --allow-unrelated-histories --no-edit -X ours || $true
+
+          $backupDir = Join-Path $env:RUNNER_TEMP "cn_custom_backup"
+          Copy-Item -Path "$backupDir\*" -Destination "." -Recurse -Force
+
+          if ((git status --porcelain).Length -gt 0) {
+            git add -A
+            git commit -m "chore(sync): auto-sync upstream zadescoxp/order-flow-screener & preserve Chinese PySide6 GUI" || $true
+            git push origin HEAD:main || $true
+          }
+
+      - name: 4. 配置 Python 3.11 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 5. 安装 PySide6 (Qt 6)、Pillow 与 PyInstaller 打包依赖
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install PySide6 Pillow pyinstaller
+
+      - name: 6. 生成 256px 多尺寸高清 Windows 图标 (app_icon_v230.ico)
+        shell: pwsh
+        run: |
+          python scripts/generate_icon.py
+          if (-not (Test-Path "app_icon_v230.ico")) {
+            Write-Error "图标生成失败: app_icon_v230.ico 不存在"
+            exit 1
+          }
+
+      - name: 7. 使用 PyInstaller 构建精简 --onedir 目录版 (严禁 --onefile，启用 --noconsole)
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onedir --noconsole `
+            --name "OrderFlowScreener" `
+            --icon "app_icon_v230.ico" `
+            --add-data "app_icon_v230.ico;." `
+            --add-data "scripts;scripts" `
+            --hidden-import "order_flow_engine" `
+            --hidden-import "data_sources" `
+            --hidden-import "llm_providers" `
+            --hidden-import "local_api_server" `
+            --hidden-import "updater" `
+            --hidden-import "gui_app" `
+            --exclude-module "PySide6.QtWebEngineWidgets" `
+            --exclude-module "PySide6.QtWebEngineCore" `
+            --exclude-module "PySide6.Qt3DCore" `
+            --exclude-module "PySide6.Qt3DRender" `
+            --exclude-module "PySide6.QtMultimedia" `
+            --exclude-module "PySide6.QtQml" `
+            --exclude-module "PySide6.QtQuick" `
+            --exclude-module "tkinter" `
+            launcher.py
+
+      - name: 8. 强制执行打包产物 CI 自检 (--mode self-test)
+        shell: pwsh
+        run: |
+          .\dist\OrderFlowScreener\OrderFlowScreener.exe --mode self-test
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "OrderFlowScreener.exe --mode self-test 自检未通过，中止打包！"
+            exit 1
+          }
+          Write-Host "CI --mode self-test 自检通过！"
+
+      - name: 9. 使用 Inno Setup 编译标准 Windows 安装包 (OrderFlowScreener-Setup-win64.exe)
+        shell: pwsh
+        run: |
+          iscc installer/order-flow-screener.iss
+          if (-not (Test-Path "dist/OrderFlowScreener-Setup-win64.exe")) {
+            Write-Error "Inno Setup 编译失败: dist/OrderFlowScreener-Setup-win64.exe 未生成"
+            exit 1
+          }
+
+      - name: 10. 计算安装包 SHA256 校验值并生成发布说明
+        id: prep_release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.release_tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = "v2.3.0"
+          }
+          $hash = (Get-FileHash "dist/OrderFlowScreener-Setup-win64.exe" -Algorithm SHA256).Hash
+          $sizeMB = [math]::Round((Get-Item "dist/OrderFlowScreener-Setup-win64.exe").Length / 1MB, 2)
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "size_mb=$sizeMB" >> $env:GITHUB_OUTPUT
+
+      - name: 11. 自动发布至 GitHub Releases (仅发布 OrderFlowScreener-Setup-win64.exe)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.prep_release.outputs.tag }}
+          name: "Order Flow Screener 订单流微观结构量化终端 ${{ steps.prep_release.outputs.tag }} (全中文 Windows 安装版)"
+          body: |
+            ### Order Flow Screener 订单流微观结构量化终端 ${{ steps.prep_release.outputs.tag }} (全中文原生 PySide6 桌面安装版)
+
+            - **上游基准仓库**：`zadescoxp/order-flow-screener` (Order Flow Tracker v2.3.0)
+            - **安装包文件**：`OrderFlowScreener-Setup-win64.exe` (${{ steps.prep_release.outputs.size_mb }} MB)
+            - **SHA256 校验和**：`${{ steps.prep_release.outputs.sha256 }}`
+
+            #### 核心特性
+            1. **纯原生 PySide6 (Qt 6) 全中文深色桌面终端**：启用 Per-Monitor v2 HiDPI 高分屏抗模糊与 256px 多尺寸高清图标 (`app_icon_v230.ico`)，支持系统托盘后台常驻，零黑框 (`--noconsole` + `CREATE_NO_WINDOW`)。
+            2. **100% 源项目订单流功能覆盖**：
+               - 足迹图 (Footprint Bid×Ask / Delta / Volume)、≥3× 失衡与连续堆叠失衡、单K线 POC、当日 VWAP ±1σ/±2σ、70% 价值区 (POC/VAH/VAL)
+               - 挂单流动性热力图 (Resting-Liquidity Heatmap) 与成交量热力图、大单气泡与强平爆仓圆环气泡
+               - 微观结构探测器：被动限价吸收 (`ABS`) 与机构冰山单 (`Iceberg`)
+               - 跨交易所对比与 250ms 步进领先/滞后相关性 (`Lead / Lag`)、前日关键位 (`pPOC/pVAH/pVAL/pVWAP`) 与近 7 日未回补裸 POC (`nPOC`)
+               - 多所聚合订单簿阶梯、OBI 失衡度、毫秒级逐笔成交流 (`Time & Sales`)、双轴 `CVD vs 价格` 背离检测、`Volume Z-Score` 与年化已实现波动率 (`RV / ATR / Parkinson`)
+               - 衍生品持仓四象限状态机 (`新多/空头回补/新空/多头平仓`)、8h 资金费率、期现基差与爆仓级联监控
+               - 9大智能预警规则、实时录制与 1×/5×/20× 虚拟时钟回放、全格式导出 (`CSV / PNG / Markdown / HTML`)
+            3. **免 Key 本地大模型与主流云端大模型中心**：内置 Ollama (`11434`)、LM Studio (`1234`)、vLLM (`8000`) 免 Key 直连与自动模型发现，集成 DeepSeek、硅基流动、通义千问、智谱 GLM、月之暗面 Kimi、OpenAI、Gemini、Claude，并在本地启动 `http://127.0.0.1:8787` OpenAI 兼容网关。
+            4. **12大市场数据源接口中心**：覆盖 Binance / Bybit / OKX / Bitget / Hyperliquid / Deribit / Coinbase 与 Finnhub (OANDA 外汇)，双向同步 `.env.local` 并支持一键并发延迟探测。
+            5. **应用内一键静默自动更新**：支持检测 GitHub Releases 并通过 `/VERYSILENT` 一键静默覆盖升级。
+          files: |
+            dist/OrderFlowScreener-Setup-win64.exe
+          draft: false
+          prerelease: false
+          overwrite_files: true
