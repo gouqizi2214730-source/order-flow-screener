@@ -46,6 +46,14 @@ def setup_runtime_paths_and_logging() -> Path:
             sys.stdout = log_stream
         if sys.stderr is None:
             sys.stderr = log_stream
+    else:
+        for stream_name in ("stdout", "stderr"):
+            s = getattr(sys, stream_name, None)
+            if s is not None and hasattr(s, "reconfigure"):
+                try:
+                    s.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
 
     logging.basicConfig(
         level=logging.INFO,

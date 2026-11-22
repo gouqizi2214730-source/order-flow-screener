@@ -132,6 +132,8 @@ jobs:
       - name: 8. 强制执行打包产物 CI 自检 (--mode self-test)
         shell: pwsh
         run: |
+          $env:PYTHONIOENCODING = "utf-8"
+          $env:PYTHONUTF8 = "1"
           .\dist\OrderFlowScreener\OrderFlowScreener.exe --mode self-test
           if ($LASTEXITCODE -ne 0) {
             Write-Error "OrderFlowScreener.exe --mode self-test 自检未通过，中止打包！"
