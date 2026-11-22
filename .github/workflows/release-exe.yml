@@ -134,12 +134,12 @@ jobs:
         run: |
           $env:PYTHONIOENCODING = "utf-8"
           $env:PYTHONUTF8 = "1"
-          .\dist\OrderFlowScreener\OrderFlowScreener.exe --mode self-test
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "OrderFlowScreener.exe --mode self-test 自检未通过，中止打包！"
+          $proc = Start-Process -FilePath ".\dist\OrderFlowScreener\OrderFlowScreener.exe" -ArgumentList "--mode self-test" -Wait -PassThru -NoNewWindow
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "OrderFlowScreener.exe --mode self-test 自检未通过 (ExitCode=$($proc.ExitCode))，中止打包！"
             exit 1
           }
-          Write-Host "CI --mode self-test 自检通过！"
+          Write-Host "CI --mode self-test 自检通过 (ExitCode=0)！"
 
       - name: 9. 使用 Inno Setup 编译标准 Windows 安装包 (OrderFlowScreener-Setup-win64.exe)
         shell: pwsh
